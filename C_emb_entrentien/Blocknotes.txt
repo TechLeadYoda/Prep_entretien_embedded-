@@ -1,0 +1,54 @@
+-----------------------------------------------17/10/2026 ------------------------------------------------------------------------------------
+1 - Dessin de l'architecture et CAN
+   a/
+    SWC            → Application
+    RTE            → Générée (lien SWC ↔ BSW)
+    BSW            → Rx normal : CanIf → PduR → Com → RTE → SWC
+                    Rx diag   : CanIf → PduR → CanTp → Dcm
+                    Tx        : chemin inverse
+    MCAL           → Can Driver (pilote le contrôleur CAN)
+    Microcontrôleur→ Contrôleur CAN
+    Hardware       → Transceiver CAN (puce externe) → bus CAN_H / CAN_L
+
+    Appli / Dcm : "je veux communiquer"
+        ↓
+    ComM   → décide : FULL communication sur ce réseau
+        ↓
+    CanSM  → démarre le réseau
+        ↓                ↓
+    CanIf → Can Driver     CanTrcv
+    (contrôleur START)     (transceiver NORMAL)
+
+    ComM (Communication Manager) : il décide si on communique ou pas
+
+    Une application (ou le Dcm) dit : « j’ai besoin de communiquer »
+    ComM gère cette demande par réseau (un canal par réseau)
+    3 modes : FULL (émission + réception), SILENT (réception seule), NO (rien)
+    Il ne touche pas au CAN directement : il donne l’ordre à CanSM
+
+    CanSM (CAN State Manager) : il exécute l’ordre sur le réseau CAN
+
+    Il met le contrôleur et le transceiver dans le bon mode (démarré, arrêté, veille)
+    Il gère le bus-off : quand le contrôleur a trop d’erreurs, il se coupe du bus. CanSM le détecte, attend, puis relance le contrôleur (récupération bus-off)
+    Il remonte l’état à ComM
+
+    CanTrcv (CAN Transceiver Driver) : il pilote la puce transceiver
+
+    Il change son mode : Normal, Standby, Sleep
+    Il gère le réveil par le bus (wake-up)
+    Il se trouve dans la couche ECU Abstraction, car le transceiver est sur la carte, pas dans le micro
+
+     a/Reveil par CAN
+            Autre ECU envoie une trame NM
+            ↓
+        Transceiver détecte → réveille le micro (INH / interruption)
+            ↓
+        CanTrcv → signale la source de réveil à EcuM
+            ↓
+        EcuM    → valide le réveil (vrai réveil ou bruit ?)
+            ↓
+        ComM    → demande la communication
+            ↓
+        CanSM   → démarre contrôleur + transceiver
+            ↓
+        CanNm   → l'ECU participe au réseau
