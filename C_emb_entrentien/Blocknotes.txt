@@ -52,3 +52,182 @@
         CanSM   → démarre contrôleur + transceiver
             ↓
         CanNm   → l'ECU participe au réseau
+
+
+
+    b/
+        Can Driver → trame CAN / L-PDU   (CAN ID + DLC + octets)
+        CanIf      → L-PDU               (convertit CAN ID → PDU ID)
+        PduR       → I-PDU               (route seulement, ne lit pas le contenu)
+        Com        → signal              (découpe la PDU en signaux)
+        RTE        → data element        (valeur lue par le SWC)
+
+        L-PDU vs I-PDU
+
+        L-PDU : la trame côté bus (CAN ID, DLC, octets), entre Can Driver et CanIf, dépend du bus
+        I-PDU : le message côté logiciel (PDU ID + données), entre PduR et Com/Dcm, indépendante du bus
+        Message normal : 1 L-PDU = 1 I-PDU
+        Diag long : 1 I-PDU = plusieurs trames, découpée par CanTp (N-PDU)
+-----------------------------------------------20/10/2026--------------------------------------------------------------------
+a/SPI
+
+    Bus série synchrone, maître/esclave, pour composants sur la même carte
+    4 fils : SCLK, MOSI, MISO, CS
+    Full-duplex, rapide, mais sans adresse ni contrôle d’erreur
+    4 modes (CPOL/CPHA)
+
+    Driver SPI AUTOSAR
+
+    Canal = données
+    Job = transmission vers un esclave (1 CS), non interruptible
+    Séquence = suite de jobs, lancée par l’appli
+
+    Arbre d’horloge (Mcu)
+
+    Quartz → PLL (multiplie) → diviseurs (répartissent)
+    Attendre le verrouillage de la PLL avant de basculer dessus
+    Les vitesses SPI et CAN dépendent de l’horloge
+    Fréquence max du SPI
+
+    Pas de limite fixée par le protocole
+    Elle dépend du maître (souvent f_périph ÷ 2), de l’esclave (datasheet) et de la carte (longueur des pistes)
+    On prend le plus lent des trois
+    En pratique : 1 à 20 MHz courant, jusqu’à ~50 MHz sur micros auto, 100 MHz+ en Quad SPI
+
+b/ 
+    SOF | ID (11) | RTR | IDE | r0 | DLC (4) | Données (0-8 octets) | CRC (15) | ACK | EOF (7)
+    SOF : début de trame (1 bit dominant)
+    ID : identifiant = priorité du message (pas l’adresse d’un ECU)
+    RTR : 0 = trame de données, 1 = trame de demande (remote)
+    IDE : 0 = standard (11 bits), 1 = étendu (29 bits)
+    DLC : nombre d’octets de données
+    CRC : contrôle d’erreur
+    ACK : un récepteur qui a bien reçu met ce bit à 0
+    EOF : fin de trame (7 bits récessifs)
+
+    Retenir l ordre
+    Début → Arbitrage → Contrôle → Données → CRC → ACK → Fin
+    SOF     ID + RTR   IDE r0 DLC   0-8 oct   15     1     7
+
+    Phrase pour l’ordre : « Sans Arbitre, Contrôler Des Colis Avant l’Expédition »
+    → SOF, Arbitrage, Contrôle, Données, CRC, ACK, EOF
+
+        Bloc	   Champ	Valeur	Sens
+        Début	    SOF	      0	     Je commence
+        Arbitrage	ID	    0x123	Priorité du message
+                    RTR	      0	     Trame de données
+        Contrôle	IDE	      0	    ID standard 11 bits
+                    r0	      0	    Réservé
+                    DLC	0x8 (1000)	8 octets
+        Données	Octets 1 à 8	11 22 33 44 55 66 77 88	Le contenu
+        CRC	CRC	15 bits	Calculé par le contrôleur
+        ACK	ACK slot	0	Un récepteur confirme
+        Fin	EOF	1111111	Fin de trame
+
+    Dans PCAN
+
+    CAN-ID   Type   Length   Data
+    123h     -      8        11 22 33 44 55 66 77 88
+
+Rappel de l’ordre : « Sans Arbitre, Contrôler Des Colis Avant l’Expédition »
+
+    L’arbitrage
+    Tous les ECU peuvent émettre en même temps
+    0 = dominant, 1 = récessif : si un ECU met 0 et un autre 1, le bus lit 0
+    Chaque émetteur relit le bus bit par bit pendant l’ID. S’il envoie 1 et lit 0, il a perdu : il s’arrête et devient récepteur, puis réessaie plus tard
+    L’ID le plus petit gagne = priorité la plus haute
+    Non destructif : le message gagnant n’est pas abîmé, pas de temps perdu
+    3. Le bit stuffing
+    Après 5 bits identiques, l’émetteur insère 1 bit inverse
+    Le récepteur l’enlève automatiquement
+    But : avoir assez de fronts pour que les récepteurs restent synchronisés (pas d’horloge sur le bus)
+    Appliqué du SOF jusqu’au CRC
+    Si un récepteur voit 6 bits identiques → erreur de stuffing
+    4. CAN FD
+        CAN classique	CAN FD
+    Données max	8 octets	64 octets
+    Débit	~500 kbit/s – 1 Mbit/s	Arbitrage pareil, phase données plus rapide (2 à 8 Mbit/s)
+    CRC	15 bits	17 ou 21 bits (plus robuste)
+    Trame remote	Oui	Non
+    Nouveaux bits : FDF (trame FD), BRS (on accélère pour les données), ESI (état d’erreur de l’émetteur)
+    Au-delà de 8, le DLC donne : 12, 16, 20, 24, 32, 48, 64 octets
+    Pourquoi : plus de données, plus vite (diag, flashage, ADAS)
+    5. Les erreurs
+
+    5 types d’erreurs
+
+    Bit error : l’émetteur lit un bit différent de celui qu’il envoie (hors arbitrage et ACK)
+    Stuff error : 6 bits identiques
+    CRC error : CRC calculé ≠ CRC reçu
+    Form error : un bit à valeur fixe est faux (ex. EOF)
+    ACK error : personne n’a acquitté
+
+    Quand un ECU détecte une erreur, il envoie une trame d’erreur pour que tout le monde jette le message. L’émetteur le renvoie ensuite.
+
+c/
+    LIN
+    Principe
+
+    Bus lent et pas cher (1 fil, ~20 kbit/s max) pour les fonctions simples : vitres, rétros, sièges, capteurs pluie
+    Souvent un sous-réseau du CAN : un ECU fait passerelle CAN ↔ LIN
+
+    Maître / esclave
+
+    Un seul maître, jusqu’à 16 esclaves
+    Le maître envoie toujours l’en-tête : Break + Sync (0x55) + PID (identifiant)
+    L’esclave concerné répond avec la réponse : données (1 à 8 octets) + checksum
+    Pas d’arbitrage : seul le maître décide qui parle, donc pas de collision
+
+    Schedule table
+
+    Liste ordonnée des trames que le maître envoie, chacune dans un créneau de temps fixe
+    Le maître la joue en boucle → communication déterministe
+    On peut en avoir plusieurs (normal, diag, veille) et basculer entre elles
+    Types de trames : inconditionnelle, event-triggered, sporadique, diag (0x3C requête maître, 0x3D réponse esclave)
+
+    Fichier LDF (LIN Description File)
+
+    Fichier texte qui décrit tout le réseau : nœuds, débit, trames, signaux, schedule tables
+    Sert à générer la configuration des ECU (comme un DBC pour le CAN)
+
+    Veille / réveil : commande go-to-sleep envoyée par le maître ; n’importe quel nœud peut réveiller le bus avec une impulsion dominante.
+
+    Diagnostic
+    Services UDS
+    Service	Nom	Rôle
+    0x10	Session Control	Changer de session : 01 défaut, 02 programmation, 03 étendue
+    0x14	Clear DTC	Effacer les défauts mémorisés
+    0x19	Read DTC Info	Lire les défauts (sous-fonctions : 0x02 par masque de statut, 0x04 snapshot, 0x06 données étendues)
+    0x22	Read Data By Identifier	Lire une donnée via un DID (ex. 0xF190 = VIN)
+    0x27	Security Access	Déverrouiller l’ECU par seed/key : impair = demande de seed, pair = envoi de la clé
+
+    Réponses
+
+    Positive : SID + 0x40 (ex. 0x22 → 0x62)
+    Négative : 0x7F + SID + NRC (code d’erreur)
+    0x31 : valeur hors plage
+    0x33 : accès sécurité refusé
+    0x35 : clé invalide
+    0x78 : réponse en attente
+    0x7F : service non supporté dans cette session
+    DTC (Diagnostic Trouble Code)
+    Code de défaut sur 3 octets + un octet de statut (8 bits)
+    Bits de statut importants : bit 0 testFailed, bit 2 pendingDTC, bit 3 confirmedDTC, bit 7 demande d’allumage de voyant
+    Données associées : snapshot (freeze frame : conditions au moment du défaut) et données étendues (compteurs, aging)
+    DEM (Diagnostic Event Manager)
+    Reçoit les événements des SWC et du BSW : Dem_SetEventStatus(PASSED / FAILED)
+    Fait le debouncing (par compteur ou par temps) pour éviter les faux défauts
+    Transforme l’événement en DTC, gère son statut, le stocke en NVM, gère l’aging (effacement auto après X cycles OK)
+    Le Dcm interroge le Dem quand un testeur envoie 0x19 ou 0x14
+    FiM (Function Inhibition Manager)
+    Bloque une fonction quand certains défauts sont présents
+    Ex. : capteur de vitesse en défaut → on inhibe le régulateur de vitesse
+    Le SWC demande : FiM_GetFunctionPermission() avant d’exécuter sa fonction
+    DEXT (Diagnostic Extract)
+    Fichier ARXML fourni par le constructeur qui décrit tout le diag de l’ECU : services, sessions, sécurité, DID, DTC, événements
+    Sert à configurer Dcm et Dem automatiquement
+    Testeur → Dcm (services UDS) → Dem (DTC) → NVM
+                                    ↑
+                            SWC : Dem_SetEventStatus
+                                    ↓
+                                FiM (inhibe les fonctions)
